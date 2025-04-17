@@ -1,12 +1,12 @@
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::env;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 use log::{debug, info};
 use env_logger;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct Event {
     seq: u64,
@@ -16,64 +16,60 @@ struct Event {
 fn receiver_thread_a(
     name: &'static str,
     rx: Receiver<Event>,
-    state: Arc<(Mutex<u64>, Condvar)>,
+    last_processed: Arc<AtomicU64>,
     use_sync: bool,
 ) {
+    let mut events_count: usize = 0;
     for event in rx.iter() {
         let seq = event.seq;
 
         if use_sync {
-            let mut guard = state.0.lock().unwrap();
-            *guard = seq;
-            state.1.notify_all();
+            last_processed.store(seq, Ordering::SeqCst);
             debug!(
-                "[Receiver {}] Notified after processing event: {}, current: {}",
-                name, seq, *guard
+                "[Receiver {}] Updated last_processed to: {} after processing event: {:?}",
+                name, seq, event
             );
         } else {
             debug!("[Receiver {}] Processed event: {:?}", name, event);
         }
+        events_count += 1;
     }
 
-    info!("[Receiver {}] Done.", name);
+    info!("[Receiver {}] Done. count: {events_count}", name);
 }
 
 fn receiver_thread_b(
     name: &'static str,
     rx: Receiver<Event>,
-    state: Arc<(Mutex<u64>, Condvar)>,
+    last_processed: Arc<AtomicU64>,
     use_sync: bool,
 ) {
+    let mut events_count: usize = 0;
     for event in rx.iter() {
         let seq = event.seq;
 
         if use_sync {
-            let mut guard = state.0.lock().unwrap();
-
-            while *guard < seq - 1 {
-                debug!(
-                    "[Receiver {}] Waiting for event {}, current: {}",
-                    name,
-                    seq - 1,
-                    *guard
-                );
-                guard = state.1.wait(guard).unwrap();
+            // Spin-wait until the previous sequence is processed
+            while last_processed.load(Ordering::SeqCst) < seq - 1 {
+                std::thread::yield_now(); // Yield to avoid busy-waiting
             }
 
-            if *guard < seq {
-                *guard = seq;
+            let current = last_processed.load(Ordering::SeqCst);
+            if current < seq {
+                let _ = last_processed.compare_exchange(current, seq, Ordering::SeqCst, Ordering::SeqCst);
             }
-            state.1.notify_all();
+
             debug!(
-                "[Receiver {}] Notified after processing event: {}, current: {}",
-                name, seq, *guard
+                "[Receiver {}] Updated last_processed to: {} after processing event: {:?}",
+                name, seq, event
             );
         } else {
             debug!("[Receiver {}] Processed event: {:?}", name, event);
         }
+        events_count += 1;
     }
 
-    info!("[Receiver {}] Done.", name);
+    info!("[Receiver {}] Done, count: {events_count}.", name);
 }
 
 fn sender_thread(tx_a: Sender<Event>, tx_b: Sender<Event>) {
@@ -113,10 +109,10 @@ fn main() {
     let (tx_a, rx_a) = unbounded::<Event>();
     let (tx_b, rx_b) = unbounded::<Event>();
 
-    let shared_seq = Arc::new((Mutex::new(0u64), Condvar::new())); // last_processed = 0
+    let last_processed = Arc::new(AtomicU64::new(0)); // last_processed = 0
 
-    let state_a = Arc::clone(&shared_seq);
-    let state_b = Arc::clone(&shared_seq);
+    let state_a = Arc::clone(&last_processed);
+    let state_b = Arc::clone(&last_processed);
 
     let handle_a = thread::spawn(move || receiver_thread_a("A", rx_a, state_a, use_sync));
     let handle_b = thread::spawn(move || receiver_thread_b("B", rx_b, state_b, use_sync));
