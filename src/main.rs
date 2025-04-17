@@ -3,7 +3,10 @@ use std::env;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Instant;
+use log::{debug, info};
+use env_logger;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct Event {
     seq: u64,
@@ -19,23 +22,20 @@ fn receiver_thread_a(
     for event in rx.iter() {
         let seq = event.seq;
 
-        // It's our turn
-        // println!("[Receiver {}] Processing {:?}", name, event);
-
-        // just notify it.
         if use_sync {
             let mut guard = state.0.lock().unwrap();
             *guard = seq;
-            // updating the last processed seq
-            // println!(
-            //     "[Receiver {}] notify we are done with my event: {}, current: {}",
-            //     name, seq, *guard
-            // );
             state.1.notify_all();
+            debug!(
+                "[Receiver {}] Notified after processing event: {}, current: {}",
+                name, seq, *guard
+            );
+        } else {
+            debug!("[Receiver {}] Processed event: {:?}", name, event);
         }
     }
 
-    println!("[Receiver {}] Done.", name);
+    info!("[Receiver {}] Done.", name);
 }
 
 fn receiver_thread_b(
@@ -50,28 +50,30 @@ fn receiver_thread_b(
         if use_sync {
             let mut guard = state.0.lock().unwrap();
 
-            // Wait until last_processed == seq - 1
             while *guard < seq - 1 {
-                // println!(
-                //     "[Receiver {}] my event: {} waiting for event {}, current: {}",
-                //     name,
-                //     seq,
-                //     seq - 1,
-                //     *guard
-                // );
+                debug!(
+                    "[Receiver {}] Waiting for event {}, current: {}",
+                    name,
+                    seq - 1,
+                    *guard
+                );
                 guard = state.1.wait(guard).unwrap();
             }
 
-            // It's our turn
-            // println!("[Receiver {}] Processing event {:?}", name, event);
             if *guard < seq {
                 *guard = seq;
             }
             state.1.notify_all();
+            debug!(
+                "[Receiver {}] Notified after processing event: {}, current: {}",
+                name, seq, *guard
+            );
+        } else {
+            debug!("[Receiver {}] Processed event: {:?}", name, event);
         }
     }
 
-    println!("[Receiver {}] Done.", name);
+    info!("[Receiver {}] Done.", name);
 }
 
 fn sender_thread(tx_a: Sender<Event>, tx_b: Sender<Event>) {
@@ -85,26 +87,26 @@ fn sender_thread(tx_a: Sender<Event>, tx_b: Sender<Event>) {
             payload: format!("Payload {}", seq),
         };
 
-        // println!(
-        //     "[Sender] Sending event {} to {}",
-        //     seq,
-        //     if i % 2 == 0 { "A" } else { "B" }
-        // );
-
         tx.send(event).unwrap();
+        debug!(
+            "[Sender] Sent event {} to {}",
+            seq,
+            if i % 2 == 0 { "A" } else { "B" }
+        );
         seq += 1;
-
-        //thread::sleep(Duration::from_millis(20));
     }
 
     drop(tx_a);
     drop(tx_b);
+    info!("[Sender] Done sending events.");
 }
 
 fn main() {
+    env_logger::init();
+
     let args: Vec<String> = env::args().collect();
     let use_sync = args.get(1).map_or(false, |arg| arg == "sync");
-    println!("Using sync: {use_sync}");
+    info!("Using sync: {}", use_sync);
 
     let start = Instant::now();
 
@@ -123,5 +125,5 @@ fn main() {
     sender_handle.join().unwrap();
     handle_a.join().unwrap();
     handle_b.join().unwrap();
-    println!("All done in {}ms", start.elapsed().as_millis());
+    info!("All done in {}ms", start.elapsed().as_millis());
 }
